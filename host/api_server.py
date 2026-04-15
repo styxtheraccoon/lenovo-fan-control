@@ -1,0 +1,204 @@
+"""
+HTTP API Server for HomeAssistant / Homepage integration.
+Runs in a background thread, provides fan status and control endpoints.
+"""
+
+import json
+import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse
+
+log = logging.getLogger("fan-control.api")
+
+
+class APIHandler(BaseHTTPRequestHandler):
+    """HTTP request handler for fan control API."""
+
+    # Reference to the FanControlService instance (set by APIServer)
+    service = None
+
+    def log_message(self, format, *args):
+        """Route HTTP logs through our logger."""
+        log.debug(format, *args)
+
+    def _check_auth(self):
+        """Validate API key if configured. Returns True if authorised."""
+        api_key = self.service.config.api_key
+        if not api_key:
+            return True
+
+        auth_header = self.headers.get("Authorization", "")
+        if auth_header == f"Bearer {api_key}":
+            return True
+
+        # Also accept X-API-Key header
+        x_api_key = self.headers.get("X-API-Key", "")
+        if x_api_key == api_key:
+            return True
+
+        self._send_json(401, {"error": "unauthorised"})
+        return False
+
+    def _send_json(self, status_code, data):
+        """Send a JSON response."""
+        body = json.dumps(data, indent=2).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_body(self):
+        """Read and parse JSON request body."""
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length == 0:
+            return {}
+        body = self.rfile.read(content_length)
+        return json.loads(body.decode("utf-8"))
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+
+        if not self._check_auth():
+            return
+
+        if path == "/api/status":
+            self._handle_status()
+        elif path == "/api/health":
+            self._handle_health()
+        else:
+            self._send_json(404, {"error": "not found"})
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+
+        if not self._check_auth():
+            return
+
+        if path == "/api/override":
+            self._handle_override()
+        elif path == "/api/auto":
+            self._handle_auto()
+        else:
+            self._send_json(404, {"error": "not found"})
+
+    def do_OPTIONS(self):
+        """Handle CORS preflight."""
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers",
+                         "Authorization, X-API-Key, Content-Type")
+        self.end_headers()
+
+    # --- Endpoint handlers ---
+
+    def _handle_status(self):
+        """GET /api/status - Current system state."""
+        svc = self.service
+
+        # Query RP2040 for live status
+        ok, resp = svc.serial.send_command("GET_STATUS")
+        rp2040_status = resp.get("payload", {}) if ok else {"error": "offline"}
+
+        status = {
+            "cpu_temp": svc.temp_reader.last_temp,
+            "controller": rp2040_status,
+            "serial": {
+                "connected": svc.serial.is_connected,
+                "port": svc.config.serial_port,
+                "last_error": svc.serial.last_error,
+            },
+            "service": {
+                "uptime_s": round(svc.uptime, 1),
+                "poll_interval": svc.config.poll_interval,
+                "loops": svc.loop_count,
+            },
+        }
+        self._send_json(200, status)
+
+    def _handle_health(self):
+        """GET /api/health - Simple health check."""
+        svc = self.service
+        healthy = svc.serial.is_connected and svc.temp_reader.last_temp is not None
+        self._send_json(
+            200 if healthy else 503,
+            {
+                "status": "healthy" if healthy else "degraded",
+                "serial_connected": svc.serial.is_connected,
+                "last_temp": svc.temp_reader.last_temp,
+                "uptime_s": round(svc.uptime, 1),
+            }
+        )
+
+    def _handle_override(self):
+        """POST /api/override - Set manual fan speed."""
+        try:
+            body = self._read_body()
+        except Exception:
+            self._send_json(400, {"error": "invalid JSON body"})
+            return
+
+        percent = body.get("percent")
+        if percent is None or not isinstance(percent, (int, float)):
+            self._send_json(400, {"error": "missing or invalid 'percent' (0-100)"})
+            return
+
+        percent = max(0, min(100, float(percent)))
+        ok, resp = self.service.serial.send_command(
+            "SET_OVERRIDE", {"percent": percent}
+        )
+
+        if ok:
+            self._send_json(200, {
+                "status": "ok",
+                "override_percent": percent,
+                "controller": resp.get("payload", {}),
+            })
+        else:
+            self._send_json(502, {"error": "controller offline", "detail": resp})
+
+    def _handle_auto(self):
+        """POST /api/auto - Return to automatic fan curve."""
+        ok, resp = self.service.serial.send_command("SET_AUTO")
+        if ok:
+            self._send_json(200, {
+                "status": "ok",
+                "controller": resp.get("payload", {}),
+            })
+        else:
+            self._send_json(502, {"error": "controller offline", "detail": resp})
+
+
+class APIServer:
+    """Threaded HTTP API server."""
+
+    def __init__(self, service):
+        self._service = service
+        self._server = None
+        self._thread = None
+
+        # Inject service reference into handler class
+        APIHandler.service = service
+
+    def start(self):
+        """Start the API server in a background daemon thread."""
+        host = self._service.config.api_host
+        port = self._service.config.api_port
+
+        self._server = HTTPServer((host, port), APIHandler)
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            name="api-server",
+            daemon=True,
+        )
+        self._thread.start()
+        log.info("API server listening on %s:%d", host, port)
+
+    def stop(self):
+        """Shutdown the API server."""
+        if self._server:
+            self._server.shutdown()
+            log.info("API server stopped")

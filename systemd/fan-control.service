@@ -1,0 +1,33 @@
+[Unit]
+Description=Lenovo P330 Fan Control Service
+Documentation=https://github.com/your-repo/lenovo-fan-control
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/fan-control/fan_control_service.py
+WorkingDirectory=/opt/fan-control
+
+# Configuration
+EnvironmentFile=-/etc/fan-control/fan-control.env
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/dev
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fan-control
+
+[Install]
+WantedBy=multi-user.target
