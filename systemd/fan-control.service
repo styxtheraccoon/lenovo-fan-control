@@ -1,6 +1,6 @@
 [Unit]
 Description=Lenovo P330 Fan Control Service
-Documentation=https://github.com/your-repo/lenovo-fan-control
+Documentation=https://github.com/styxtheraccoon/lenovo-fan-control
 After=network.target
 StartLimitIntervalSec=60
 StartLimitBurst=5
