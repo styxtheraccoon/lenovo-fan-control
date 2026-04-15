@@ -16,6 +16,8 @@ EnvironmentFile=-/etc/fan-control/fan-control.env
 # Restart policy
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=10
+KillMode=mixed
 
 # Security hardening
 NoNewPrivileges=true

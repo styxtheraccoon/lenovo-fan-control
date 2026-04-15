@@ -206,7 +206,7 @@ sensor:
     resource: http://PROXMOX_IP:9780/api/status
     headers:
       X-API-Key: "YOUR_KEY"
-    value_template: "{{ value_json.cpu_temp }}"
+    value_template: "{{ value_json.cpu_temp if value_json.cpu_temp is number else None }}"
     unit_of_measurement: "°C"
     json_attributes:
       - controller
@@ -225,6 +225,7 @@ sensor:
 | Fans stuck at 100% | Check watchdog — service may not be running or serial is disconnected |
 | API returns 401 | Verify your API key matches config |
 | Fans don't spin below 25% | Normal — `MIN_DUTY` is 20% to prevent stalling. Adjust in `firmware/config.py` |
+| HA sensor shows JSON/value errors | Verify your API key in HA `configuration.yaml` matches the service config — a wrong key returns `401` and HA cannot parse the response |
 
 ## Project Structure
 

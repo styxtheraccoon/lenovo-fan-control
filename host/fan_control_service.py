@@ -135,8 +135,13 @@ class TempReader:
         Search sensors JSON output for CPU package temperature.
         Handles coretemp, k10temp, and other common chip formats.
         """
+        # Chip prefixes that are definitely not CPU sensors
+        skip_chips = ("nvme", "iwlwifi", "enp", "eth", "waterforce", "acpitz", "spd5118")
+
         for chip_name, chip_data in data.items():
             if not isinstance(chip_data, dict):
+                continue
+            if any(chip_name.lower().startswith(s) for s in skip_chips):
                 continue
 
             for sensor_name, sensor_data in chip_data.items():
@@ -146,7 +151,7 @@ class TempReader:
                 # Look for package/Tctl/Tdie temperature
                 name_lower = sensor_name.lower()
                 is_cpu = any(kw in name_lower for kw in [
-                    "package", "tctl", "tdie", "cpu", "composite"
+                    "package", "tctl", "tdie", "cpu"
                 ])
 
                 if is_cpu:
@@ -154,7 +159,7 @@ class TempReader:
                         if "input" in key.lower() and isinstance(val, (int, float)):
                             return float(val)
 
-        # Fallback: try the first temp_input we find under coretemp
+        # Fallback: try the first temp_input we find under coretemp / k10temp
         for chip_name, chip_data in data.items():
             if "coretemp" in chip_name.lower() or "k10temp" in chip_name.lower():
                 if isinstance(chip_data, dict):
@@ -194,6 +199,7 @@ class SerialProtocol:
         self._connected = False
         self._last_status = None
         self._last_error = None
+        self._shutting_down = False
 
     def connect(self):
         """Open the serial port. Returns True on success."""
@@ -217,11 +223,20 @@ class SerialProtocol:
             log.error("Serial connection failed: %s", e)
             return False
 
-    def disconnect(self):
-        """Close the serial port."""
+    def close_port(self):
+        """Close the serial port for reconnection (does not acquire lock)."""
         if self._port and self._port.is_open:
-            self._port.close()
+            try:
+                self._port.close()
+            except Exception as e:
+                log.warning("Error closing serial port: %s", e)
         self._connected = False
+
+    def disconnect(self):
+        """Close the serial port for shutdown. Waits for any in-flight command to finish."""
+        self._shutting_down = True
+        with self._lock:
+            self.close_port()
 
     def send_command(self, cmd, payload=None):
         """
@@ -327,6 +342,7 @@ class FanControlService:
         self._temp_reader = TempReader()
         self._serial = SerialProtocol(self._config)
         self._running = False
+        self._shutdown_event = threading.Event()
         self._start_time = time.time()
         self._loop_count = 0
 
@@ -380,7 +396,7 @@ class FanControlService:
                 else:
                     log.warning("Serial send failed: %s", resp)
                     # Try reconnecting
-                    self._serial.disconnect()
+                    self._serial.close_port()
                     self._serial.connect()
             else:
                 log.warning("Temperature read failed (loop %d)", self._loop_count)
@@ -390,9 +406,7 @@ class FanControlService:
 
     def _interruptible_sleep(self, seconds):
         """Sleep that can be interrupted by shutdown signal."""
-        end_time = time.time() + seconds
-        while self._running and time.time() < end_time:
-            time.sleep(0.5)
+        self._shutdown_event.wait(timeout=seconds)
 
     def _signal_handler(self, signum, frame):
         """Handle SIGTERM / SIGINT for clean shutdown."""
@@ -401,12 +415,14 @@ class FanControlService:
         self.shutdown()
 
     def shutdown(self):
-        """Clean shutdown."""
+        """Clean shutdown: stop loop, release serial port, stop API, then exit."""
         self._running = False
-        self._serial.disconnect()
+        self._shutdown_event.set()
         if hasattr(self, "_api"):
             self._api.stop()
+        self._serial.disconnect()
         log.info("Shutdown complete")
+        sys.exit(0)
 
     # --- Properties for API access ---
 

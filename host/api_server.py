@@ -37,6 +37,8 @@ class APIHandler(BaseHTTPRequestHandler):
         if x_api_key == api_key:
             return True
 
+        log.warning("Auth failed from %s for %s %s",
+                    self.client_address[0], self.command, self.path)
         self._send_json(401, {"error": "unauthorised"})
         return False
 
@@ -103,8 +105,15 @@ class APIHandler(BaseHTTPRequestHandler):
         ok, resp = svc.serial.send_command("GET_STATUS")
         rp2040_status = resp.get("payload", {}) if ok else {"error": "offline"}
 
+        # cpu_temp must never be null/None — HA REST sensors with unit_of_measurement
+        # treat null as '' which fails numeric parsing.  Return "unavailable" so HA
+        # marks the sensor state correctly instead of raising a ValueError.
+        cpu_temp = svc.temp_reader.last_temp
+        if cpu_temp is None:
+            cpu_temp = "unavailable"
+
         status = {
-            "cpu_temp": svc.temp_reader.last_temp,
+            "cpu_temp": cpu_temp,
             "controller": rp2040_status,
             "serial": {
                 "connected": svc.serial.is_connected,
@@ -122,13 +131,14 @@ class APIHandler(BaseHTTPRequestHandler):
     def _handle_health(self):
         """GET /api/health - Simple health check."""
         svc = self.service
-        healthy = svc.serial.is_connected and svc.temp_reader.last_temp is not None
+        last_temp = svc.temp_reader.last_temp
+        healthy = svc.serial.is_connected and last_temp is not None
         self._send_json(
             200 if healthy else 503,
             {
                 "status": "healthy" if healthy else "degraded",
                 "serial_connected": svc.serial.is_connected,
-                "last_temp": svc.temp_reader.last_temp,
+                "last_temp": last_temp if last_temp is not None else "unavailable",
                 "uptime_s": round(svc.uptime, 1),
             }
         )
