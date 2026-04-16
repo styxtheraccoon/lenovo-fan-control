@@ -23,6 +23,16 @@ FAN_CURVE = [
 # Minimum duty cycle (some fans stall below ~20%)
 MIN_DUTY = 20
 
+# --- Tachometer (Advanced) ---
+# Enable to read fan RPM via tach signal. Requires wiring fan tach
+# (Pin 3 on 4-pin connector) to these GPIO inputs.
+# WARNING: RP2040 GPIO is 3.3V only. Do NOT use external 5V pull-ups.
+TACH_ENABLED = False              # Set True to enable RPM reading
+TACH_PINS = [1, 3, 5, 7]         # GPIO inputs, adjacent to PWM outputs
+TACH_PULSES_PER_REV = 2           # Standard: 2 pulses/rev (Noctua, most 4-pin fans)
+TACH_SAMPLE_MS = 1000             # RPM measurement window (ms)
+TACH_STALL_THRESHOLD = 2          # Consecutive zero-RPM samples before stall flag
+
 # --- Watchdog ---
 # Seconds without a valid message before failsafe kicks in
 WATCHDOG_TIMEOUT_S = 15

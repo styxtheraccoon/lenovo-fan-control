@@ -42,10 +42,16 @@ Custom fan control for the Lenovo P330 Tiny using an RP2040 Zero microcontroller
 | GPIO 2 | Fan 2, Pin 4 (PWM) | PWM signal |
 | GPIO 4 | Fan 3, Pin 4 (PWM) | PWM signal |
 | GPIO 6 | Fan 4, Pin 4 (PWM) | PWM signal |
-| GND | Fan 1–4, Pin 3 (GND) | Common ground |
+| GPIO 1 | Fan 1, Pin 3 (Tach) | Tach input *(optional, see [Tachometer](#tachometer))* |
+| GPIO 3 | Fan 2, Pin 3 (Tach) | Tach input *(optional)* |
+| GPIO 5 | Fan 3, Pin 3 (Tach) | Tach input *(optional)* |
+| GPIO 7 | Fan 4, Pin 3 (Tach) | Tach input *(optional)* |
+| GND | Fan 1–4, Pin 1 (GND) | Common ground |
 | VBUS (5V) | Fan 1–4, Pin 2 (VCC) | Fan power (5V from USB) |
 
-> **Note**: 4-pin fan PWM is on Pin 4 of the standard fan connector: `GND | +12V/5V | Tach | PWM`. These 40mm fans run fine on 5V from USB.
+> **Note**: 4-pin fan connector pinout: `GND | +12V/5V | Tach | PWM`. These 40mm fans run fine on 5V from USB.
+
+> **Warning**: RP2040 GPIO is **3.3V only**. The firmware uses internal 3.3V pull-ups on tach inputs. Do **NOT** use external 5V pull-ups — this will damage the RP2040.
 
 ## Installation
 
@@ -89,7 +95,10 @@ Edit `/etc/fan-control/config.json`:
     "log_level": "INFO",
     "serial_timeout": 2,
     "serial_retries": 3,
-    "reconnect_interval": 5
+    "reconnect_interval": 5,
+    "temp_sensors": {
+        "cpu": "auto"
+    }
 }
 ```
 
@@ -118,6 +127,7 @@ sudo journalctl -u fan-control -f
 | `serial_timeout` | `2` | Seconds to wait for ACK |
 | `serial_retries` | `3` | Retry count on failed send |
 | `reconnect_interval` | `5` | Seconds between reconnection attempts |
+| `temp_sensors` | `{"cpu": "auto"}` | Temperature sensor mappings — see [Multi-Sensor Temperatures](#multi-sensor-temperatures) |
 
 ## Fan Curve
 
@@ -153,8 +163,35 @@ curl -H 'X-API-Key: YOUR_KEY' http://localhost:9780/api/status
 ```json
 {
   "cpu_temp": 52.0,
+  "temps": {
+    "cpu": 52.0
+  },
   "controller": {
     "fans": [50, 50, 50, 50],
+    "mode": "auto",
+    "last_temp": 52.0,
+    "watchdog": { "triggered": false, "since_feed": 2.1 }
+  },
+  "serial": { "connected": true, "port": "/dev/ttyACM0", "last_error": null },
+  "service": { "uptime_s": 3621.3, "poll_interval": 5, "loops": 724 }
+}
+```
+
+With tach enabled and additional sensors configured, the response includes more data:
+
+```json
+{
+  "cpu_temp": 52.0,
+  "temps": {
+    "cpu": 52.0,
+    "nvme": 40.8,
+    "chipset": 55.0
+  },
+  "controller": {
+    "fans": [50, 50, 50, 50],
+    "rpm": [2400, 2400, 2400, 2400],
+    "stall": [false, false, false, false],
+    "any_stalled": false,
     "mode": "auto",
     "last_temp": 52.0,
     "watchdog": { "triggered": false, "since_feed": 2.1 }
@@ -213,11 +250,75 @@ sensor:
     value_template: "{{ value_json.cpu_temp if value_json.cpu_temp is number else None }}"
     unit_of_measurement: "°C"
     json_attributes:
+      - temps
       - controller
       - serial
       - service
     scan_interval: 30
 ```
+
+## Multi-Sensor Temperatures
+
+By default, only CPU temperature is monitored (`"cpu": "auto"`). To add additional sensors, configure `temp_sensors` in your config.json with chip and sensor glob patterns:
+
+```json
+"temp_sensors": {
+    "cpu": "auto",
+    "nvme": {"chip": "nvme-pci-0400", "sensor": "Composite"},
+    "chipset": {"chip": "nct6687*", "sensor": "PCH CHIP"},
+    "coolant": {"chip": "waterforce*", "sensor": "Coolant temp"}
+}
+```
+
+To find your available sensors, run `sensors -j` and identify the chip name (top-level key) and sensor label for each temperature you want to monitor. Glob patterns (`*`, `?`) are supported for matching.
+
+All configured temperatures are returned in the `temps` object of the `/api/status` response and can be accessed in Homepage via `temps.nvme`, `temps.chipset`, etc.
+
+## Tachometer (Advanced)
+
+Optional fan RPM reading and stall detection via the RP2040. **Disabled by default.**
+
+### Enabling
+
+1. Wire fan tach signals to the RP2040 (GPIO 1, 3, 5, 7 — see [Wiring](#wiring))
+2. Edit `firmware/config.py` on the RP2040:
+   ```python
+   TACH_ENABLED = True
+   ```
+3. Re-flash the firmware
+
+### Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `TACH_ENABLED` | `False` | Enable/disable RPM reading |
+| `TACH_PINS` | `[1, 3, 5, 7]` | GPIO input pins for tach signals |
+| `TACH_PULSES_PER_REV` | `2` | Pulses per revolution (2 for most fans including Noctua) |
+| `TACH_SAMPLE_MS` | `1000` | RPM measurement window in ms |
+| `TACH_STALL_THRESHOLD` | `2` | Consecutive zero-RPM samples before stall flag is set |
+
+### Stall Detection
+
+A fan is flagged as stalled when its RPM reads 0 for `TACH_STALL_THRESHOLD` consecutive samples while the duty cycle is above `MIN_DUTY`. The `any_stalled` field provides a single boolean for easy alerting.
+
+In Homepage (customapi widget):
+```yaml
+- field: controller.any_stalled
+  label: Fan Stall
+  format: text
+  remap:
+    - value: false
+      to: OK
+    - value: true
+      to: STALL
+```
+
+### Hardware Notes
+
+- The tach signal is **open-collector** (Noctua) or **open-drain** on most 4-pin fans
+- The RP2040 firmware uses **internal 3.3V pull-ups** — no external components needed
+- **Do NOT use external 5V pull-ups** — this will exceed the RP2040 GPIO voltage limit and cause damage
+- Some fans may use 1 or 4 pulses per revolution instead of 2 — adjust `TACH_PULSES_PER_REV` accordingly
 
 ## Troubleshooting
 
@@ -230,6 +331,8 @@ sensor:
 | API returns 401 | Verify your API key matches config |
 | Fans don't spin below 25% | Normal — `MIN_DUTY` is 20% to prevent stalling. Adjust in `firmware/config.py` |
 | HA sensor shows JSON/value errors | Verify your API key in HA `configuration.yaml` matches the service config — a wrong key returns `401` and HA cannot parse the response |
+| Tach RPM always shows 0 | Check wiring: tach is Pin 3 on the fan connector. Verify `TACH_ENABLED = True` in firmware config. Some fans need external pull-ups to 3.3V |
+| Mapped sensor returns null | Run `sensors -j` and verify the chip name and sensor label match your `temp_sensors` config patterns |
 
 ## Project Structure
 

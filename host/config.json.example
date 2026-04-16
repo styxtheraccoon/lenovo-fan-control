@@ -8,5 +8,8 @@
     "log_level": "INFO",
     "serial_timeout": 2,
     "serial_retries": 3,
-    "reconnect_interval": 5
+    "reconnect_interval": 5,
+    "temp_sensors": {
+        "cpu": "auto"
+    }
 }

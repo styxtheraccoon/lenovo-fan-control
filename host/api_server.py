@@ -105,15 +105,22 @@ class APIHandler(BaseHTTPRequestHandler):
         ok, resp = svc.serial.send_command("GET_STATUS")
         rp2040_status = resp.get("payload", {}) if ok else {"error": "offline"}
 
-        # cpu_temp must never be null/None — HA REST sensors with unit_of_measurement
-        # treat null as '' which fails numeric parsing.  Return "unavailable" so HA
-        # marks the sensor state correctly instead of raising a ValueError.
-        cpu_temp = svc.temp_reader.last_temp
+        # Build temps dict — all configured sensors
+        all_temps = svc.temp_reader.last_temps
+        # Sanitise: replace None with "unavailable" for HA compatibility
+        temps = {
+            name: (val if val is not None else "unavailable")
+            for name, val in all_temps.items()
+        }
+
+        # cpu_temp as top-level for backward compat (HA templates reference it)
+        cpu_temp = all_temps.get("cpu")
         if cpu_temp is None:
             cpu_temp = "unavailable"
 
         status = {
             "cpu_temp": cpu_temp,
+            "temps": temps,
             "controller": rp2040_status,
             "serial": {
                 "connected": svc.serial.is_connected,

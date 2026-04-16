@@ -18,6 +18,7 @@ import signal
 import logging
 import subprocess
 import threading
+import fnmatch
 import serial
 import serial.tools.list_ports
 
@@ -47,6 +48,9 @@ class Config:
         "serial_timeout": 2,        # seconds per SYN→ACK wait
         "serial_retries": 3,        # retry count on failed send
         "reconnect_interval": 5,    # seconds between reconnection attempts
+        "temp_sensors": {           # sensor mappings: "auto" or {"chip": ..., "sensor": ...}
+            "cpu": "auto",          # auto-detect CPU package temp (default)
+        },
         "config_file": "/etc/fan-control/config.json",
     }
 
@@ -100,16 +104,30 @@ class Config:
 # ============================================================================
 
 class TempReader:
-    """Reads CPU temperature from lm-sensors."""
+    """
+    Reads temperatures from lm-sensors.
+    Supports auto-detection for CPU and user-configured sensor mappings
+    via chip/sensor glob patterns.
+    """
 
-    def __init__(self):
-        self._last_temp = None
+    def __init__(self, sensor_config):
+        """
+        sensor_config: dict from config, e.g.
+        {
+            "cpu": "auto",
+            "nvme": {"chip": "nvme-pci-0400", "sensor": "Composite"},
+            "chipset": {"chip": "nct6687*", "sensor": "PCH CHIP"}
+        }
+        """
+        self._sensor_config = sensor_config
+        self._last_temps = {}    # {name: float}
         self._last_read_time = None
 
-    def read(self):
+    def read_all(self):
         """
-        Run `sensors -j` and extract the CPU package temperature.
-        Returns temperature in °C as a float, or None on failure.
+        Run `sensors -j` and extract all configured temperatures.
+        Returns dict of {name: temp_float}, e.g. {"cpu": 52.0, "nvme": 40.8}.
+        Values are None for sensors that couldn't be read.
         """
         try:
             result = subprocess.run(
@@ -118,21 +136,60 @@ class TempReader:
             )
             if result.returncode != 0:
                 log.warning("sensors command failed: %s", result.stderr.strip())
-                return self._last_temp
+                return dict(self._last_temps)
 
             data = json.loads(result.stdout)
-            temp = self._find_cpu_temp(data)
-            if temp is not None:
-                self._last_temp = temp
-                self._last_read_time = time.time()
-            return temp
+            temps = {}
+
+            for name, mapping in self._sensor_config.items():
+                if mapping == "auto":
+                    temps[name] = self._find_cpu_temp(data)
+                elif isinstance(mapping, dict):
+                    chip_pat = mapping.get("chip", "*")
+                    sensor_pat = mapping.get("sensor", "*")
+                    temps[name] = self._find_mapped_temp(
+                        chip_pat, sensor_pat, data
+                    )
+                else:
+                    log.warning("Invalid sensor mapping for '%s': %s",
+                                name, mapping)
+                    temps[name] = None
+
+            self._last_temps = temps
+            self._last_read_time = time.time()
+            return temps
 
         except subprocess.TimeoutExpired:
             log.warning("sensors command timed out")
-            return self._last_temp
+            return dict(self._last_temps)
         except Exception as e:
-            log.warning("Failed to read temperature: %s", e)
-            return self._last_temp
+            log.warning("Failed to read temperatures: %s", e)
+            return dict(self._last_temps)
+
+    def _find_mapped_temp(self, chip_pattern, sensor_pattern, data):
+        """
+        Find a temperature by matching chip name and sensor label
+        using fnmatch glob patterns.
+        """
+        for chip_name, chip_data in data.items():
+            if not isinstance(chip_data, dict):
+                continue
+            if not fnmatch.fnmatch(chip_name.lower(), chip_pattern.lower()):
+                continue
+
+            for sensor_name, sensor_data in chip_data.items():
+                if not isinstance(sensor_data, dict):
+                    continue
+                if not fnmatch.fnmatch(sensor_name.lower(), sensor_pattern.lower()):
+                    continue
+
+                # Find the *_input value
+                for key, val in sensor_data.items():
+                    if "input" in key.lower() and isinstance(val, (int, float)):
+                        return float(val)
+
+        log.debug("No match for chip='%s' sensor='%s'", chip_pattern, sensor_pattern)
+        return None
 
     def _find_cpu_temp(self, data):
         """
@@ -178,7 +235,13 @@ class TempReader:
 
     @property
     def last_temp(self):
-        return self._last_temp
+        """CPU temperature (for fan curve and backward compat)."""
+        return self._last_temps.get("cpu")
+
+    @property
+    def last_temps(self):
+        """All sensor temperatures as a dict."""
+        return dict(self._last_temps)
 
     @property
     def last_read_time(self):
@@ -383,7 +446,7 @@ class FanControlService:
 
     def __init__(self):
         self._config = Config()
-        self._temp_reader = TempReader()
+        self._temp_reader = TempReader(self._config.temp_sensors)
         self._serial = SerialProtocol(self._config)
         self._running = False
         self._shutdown_event = threading.Event()
@@ -442,13 +505,15 @@ class FanControlService:
                     self._interruptible_sleep(self._config.reconnect_interval)
                     continue
 
-            # Read temperature
-            temp = self._temp_reader.read()
-            if temp is not None:
-                log.info("CPU: %.1f°C", temp)
+            # Read temperatures
+            temps = self._temp_reader.read_all()
+            cpu_temp = temps.get("cpu")
 
-                # Send to RP2040
-                ok, resp = self._serial.send_command("SET_TEMP", {"cpu": temp})
+            if cpu_temp is not None:
+                log.info("CPU: %.1f°C", cpu_temp)
+
+                # Send CPU temp to RP2040 for fan curve
+                ok, resp = self._serial.send_command("SET_TEMP", {"cpu": cpu_temp})
                 if ok:
                     payload = resp.get("payload", {})
                     fans = payload.get("fans", [])
@@ -459,7 +524,12 @@ class FanControlService:
                     # close_port will trigger reconnect on next loop iteration
                     self._serial.close_port()
             else:
-                log.warning("Temperature read failed (loop %d)", self._loop_count)
+                log.warning("CPU temperature read failed (loop %d)", self._loop_count)
+
+            # Log additional sensor temps at debug level
+            for name, val in temps.items():
+                if name != "cpu" and val is not None:
+                    log.debug("%s: %.1f°C", name, val)
 
             # Sleep for poll interval (interruptible)
             self._interruptible_sleep(self._config.poll_interval)

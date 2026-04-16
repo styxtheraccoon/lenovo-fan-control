@@ -38,6 +38,9 @@ def main():
         if wdog.check():
             pass
 
+        # Sample tachometer (no-op if tach disabled)
+        fans.sample_tach()
+
         # Brief sleep to avoid busy-wait
         time.sleep_ms(config.LOOP_SLEEP_MS)
 
