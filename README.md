@@ -80,7 +80,7 @@ This will:
 Edit `/etc/fan-control/config.json`:
 ```json
 {
-    "serial_port": "/dev/ttyACM0",
+    "serial_port": "auto",
     "serial_baud": 115200,
     "poll_interval": 5,
     "api_port": 9780,
@@ -88,7 +88,8 @@ Edit `/etc/fan-control/config.json`:
     "api_key": "your-secure-api-key-here",
     "log_level": "INFO",
     "serial_timeout": 2,
-    "serial_retries": 3
+    "serial_retries": 3,
+    "reconnect_interval": 5
 }
 ```
 
@@ -105,7 +106,9 @@ sudo journalctl -u fan-control -f
 
 | Key / Env Var | Default | Description |
 |---------------|---------|-------------|
-| `serial_port` / `FAN_CONTROL_SERIAL_PORT` | `/dev/ttyACM0` | RP2040 serial device |
+| `serial_port` / `FAN_CONTROL_SERIAL_PORT` | `auto` | `auto` = discover RP2040 by USB VID/PID, or set a specific path (e.g. `/dev/ttyACM0`) |
+| `serial_vid` | `0x2E8A` | USB Vendor ID for auto-discovery (Raspberry Pi Foundation) |
+| `serial_pid` | `0x0005` | USB Product ID for auto-discovery (RP2040 MicroPython) |
 | `serial_baud` / `FAN_CONTROL_SERIAL_BAUD` | `115200` | Serial baud rate |
 | `poll_interval` / `FAN_CONTROL_POLL_INTERVAL` | `5` | Seconds between temp reads |
 | `api_port` / `FAN_CONTROL_API_PORT` | `9780` | HTTP API port |
@@ -114,6 +117,7 @@ sudo journalctl -u fan-control -f
 | `log_level` / `FAN_CONTROL_LOG_LEVEL` | `INFO` | Logging level |
 | `serial_timeout` | `2` | Seconds to wait for ACK |
 | `serial_retries` | `3` | Retry count on failed send |
+| `reconnect_interval` | `5` | Seconds between reconnection attempts |
 
 ## Fan Curve
 

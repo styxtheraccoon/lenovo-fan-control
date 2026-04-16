@@ -117,7 +117,7 @@ class APIHandler(BaseHTTPRequestHandler):
             "controller": rp2040_status,
             "serial": {
                 "connected": svc.serial.is_connected,
-                "port": svc.config.serial_port,
+                "port": svc.serial.active_port or svc.config.serial_port,
                 "last_error": svc.serial.last_error,
             },
             "service": {

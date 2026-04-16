@@ -1,5 +1,5 @@
 {
-    "serial_port": "/dev/ttyACM0",
+    "serial_port": "auto",
     "serial_baud": 115200,
     "poll_interval": 5,
     "api_port": 9780,
@@ -7,5 +7,6 @@
     "api_key": "CHANGE_ME_TO_A_SECURE_KEY",
     "log_level": "INFO",
     "serial_timeout": 2,
-    "serial_retries": 3
+    "serial_retries": 3,
+    "reconnect_interval": 5
 }

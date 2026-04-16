@@ -19,6 +19,7 @@ import logging
 import subprocess
 import threading
 import serial
+import serial.tools.list_ports
 
 log = logging.getLogger("fan-control")
 
@@ -34,7 +35,9 @@ class Config:
     """
 
     DEFAULTS = {
-        "serial_port": "/dev/ttyACM0",
+        "serial_port": "auto",       # "auto" = discover by VID/PID, or /dev/ttyACM0 etc.
+        "serial_vid": 0x2E8A,       # Raspberry Pi Foundation USB Vendor ID
+        "serial_pid": 0x0005,       # RP2040 MicroPython USB Product ID
         "serial_baud": 115200,
         "poll_interval": 5,         # seconds between temperature reads
         "api_port": 9780,
@@ -43,6 +46,7 @@ class Config:
         "log_level": "INFO",
         "serial_timeout": 2,        # seconds per SYN→ACK wait
         "serial_retries": 3,        # retry count on failed send
+        "reconnect_interval": 5,    # seconds between reconnection attempts
         "config_file": "/etc/fan-control/config.json",
     }
 
@@ -200,27 +204,62 @@ class SerialProtocol:
         self._last_status = None
         self._last_error = None
         self._shutting_down = False
+        self._active_port_path = None  # actual /dev path in use
+
+    def find_device(self):
+        """
+        Discover the RP2040 serial device by USB VID/PID.
+        Returns the device path (e.g. /dev/ttyACM0) or None.
+        """
+        vid = self._config.serial_vid
+        pid = self._config.serial_pid
+
+        for port_info in serial.tools.list_ports.comports():
+            if port_info.vid == vid and port_info.pid == pid:
+                log.info("Discovered RP2040 at %s (serial: %s)",
+                         port_info.device, port_info.serial_number or "n/a")
+                return port_info.device
+
+        log.warning("No USB device found with VID=0x%04X PID=0x%04X", vid, pid)
+        return None
+
+    def _resolve_port(self):
+        """
+        Resolve the serial port path.  If config is 'auto', discover by
+        VID/PID; otherwise use the configured path directly.
+        """
+        if self._config.serial_port == "auto":
+            return self.find_device()
+        return self._config.serial_port
 
     def connect(self):
         """Open the serial port. Returns True on success."""
+        port_path = self._resolve_port()
+        if port_path is None:
+            self._connected = False
+            self._last_error = "No RP2040 device found"
+            log.error(self._last_error)
+            return False
+
         try:
             self._port = serial.Serial(
-                port=self._config.serial_port,
+                port=port_path,
                 baudrate=self._config.serial_baud,
                 timeout=self._config.serial_timeout,
             )
             self._connected = True
+            self._active_port_path = port_path
             self._last_error = None
             # Flush any boot messages / stale data from the RP2040
             time.sleep(0.5)
             self._port.reset_input_buffer()
             log.info("Serial connected: %s @ %d baud",
-                     self._config.serial_port, self._config.serial_baud)
+                     port_path, self._config.serial_baud)
             return True
         except serial.SerialException as e:
             self._connected = False
             self._last_error = str(e)
-            log.error("Serial connection failed: %s", e)
+            log.error("Serial connection failed on %s: %s", port_path, e)
             return False
 
     def close_port(self):
@@ -231,6 +270,7 @@ class SerialProtocol:
             except Exception as e:
                 log.warning("Error closing serial port: %s", e)
         self._connected = False
+        self._active_port_path = None
 
     def disconnect(self):
         """Close the serial port for shutdown. Waits for any in-flight command to finish."""
@@ -309,9 +349,9 @@ class SerialProtocol:
 
             except serial.SerialException as e:
                 log.error("Serial error [%d]: %s", seq, e)
-                self._connected = False
                 self._last_error = str(e)
-                self.disconnect()
+                # close_port, not disconnect — we already hold the lock
+                self.close_port()
                 return False, {"error": str(e)}
 
         self._last_error = f"Failed after {self._config.serial_retries} retries"
@@ -328,6 +368,10 @@ class SerialProtocol:
     @property
     def last_error(self):
         return self._last_error
+
+    @property
+    def active_port(self):
+        return self._active_port_path
 
 
 # ============================================================================
@@ -363,7 +407,13 @@ class FanControlService:
         signal.signal(signal.SIGINT, self._signal_handler)
 
         # Connect to RP2040
-        log.info("Connecting to RP2040 on %s...", self._config.serial_port)
+        port_desc = self._config.serial_port
+        if port_desc == "auto":
+            log.info("Searching for RP2040 (VID=0x%04X PID=0x%04X)...",
+                     self._config.serial_vid, self._config.serial_pid)
+        else:
+            log.info("Connecting to RP2040 on %s...", port_desc)
+
         if not self._serial.connect():
             log.warning("Initial serial connection failed - will retry in main loop")
 
@@ -381,6 +431,17 @@ class FanControlService:
         while self._running:
             self._loop_count += 1
 
+            if not self._serial.is_connected:
+                # Not connected — attempt reconnection and wait
+                log.info("Serial disconnected, attempting reconnection...")
+                if self._serial.connect():
+                    log.info("Reconnected successfully")
+                else:
+                    log.warning("Reconnection failed, retrying in %ds",
+                                self._config.reconnect_interval)
+                    self._interruptible_sleep(self._config.reconnect_interval)
+                    continue
+
             # Read temperature
             temp = self._temp_reader.read()
             if temp is not None:
@@ -395,9 +456,8 @@ class FanControlService:
                     log.info("Fans: %s  Mode: %s", fans, mode)
                 else:
                     log.warning("Serial send failed: %s", resp)
-                    # Try reconnecting
+                    # close_port will trigger reconnect on next loop iteration
                     self._serial.close_port()
-                    self._serial.connect()
             else:
                 log.warning("Temperature read failed (loop %d)", self._loop_count)
 
