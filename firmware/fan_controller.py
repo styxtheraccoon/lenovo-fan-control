@@ -21,16 +21,17 @@ class TachReader:
     (Noctua) and open-drain fan tach outputs.
     """
 
-    def __init__(self, num_channels):
-        self._num_channels = num_channels
+    def __init__(self):
+        self._num_tach = len(config.TACH_PINS)
+        self._pwm_map = config.TACH_TO_PWM
         self._pins = []
-        self._counts = [0] * num_channels
-        self._rpms = [0] * num_channels
-        self._stall_counters = [0] * num_channels
-        self._stalled = [False] * num_channels
+        self._counts = [0] * self._num_tach
+        self._rpms = [0] * self._num_tach
+        self._stall_counters = [0] * self._num_tach
+        self._stalled = [False] * self._num_tach
         self._last_sample_ms = time.ticks_ms()
 
-        for i in range(num_channels):
+        for i in range(self._num_tach):
             pin_num = config.TACH_PINS[i]
             pin = Pin(pin_num, Pin.IN, Pin.PULL_UP)
             # Each pin gets its own ISR that increments the right counter.
@@ -47,8 +48,8 @@ class TachReader:
         """
         Calculate RPM from pulses accumulated since last sample.
         Should be called periodically from the main loop.
-        `duties` is the current duty list — used to determine stall
-        (RPM=0 while duty > MIN_DUTY).
+        `duties` is the current PWM duty list — used with TACH_TO_PWM
+        mapping to determine stall (RPM=0 while duty > MIN_DUTY).
         Returns True if sample window elapsed and values were updated.
         """
         now = time.ticks_ms()
@@ -60,7 +61,7 @@ class TachReader:
         self._last_sample_ms = now
         window_s = elapsed / 1000.0
 
-        for i in range(self._num_channels):
+        for i in range(self._num_tach):
             pulses = self._counts[i]
             self._counts[i] = 0
 
@@ -72,8 +73,10 @@ class TachReader:
             else:
                 self._rpms[i] = 0
 
-            # Stall detection: fan should be spinning but RPM is 0
-            if self._rpms[i] == 0 and duties[i] > config.MIN_DUTY:
+            # Stall detection: look up the PWM channel driving this fan
+            pwm_ch = self._pwm_map[i] if i < len(self._pwm_map) else 0
+            duty = duties[pwm_ch] if pwm_ch < len(duties) else 0
+            if self._rpms[i] == 0 and duty > config.MIN_DUTY:
                 self._stall_counters[i] += 1
             else:
                 self._stall_counters[i] = 0
@@ -95,6 +98,10 @@ class TachReader:
     @property
     def any_stalled(self):
         return any(self._stalled)
+
+    @property
+    def num_tach(self):
+        return self._num_tach
 
     def deinit(self):
         """Disable IRQs."""
@@ -136,8 +143,8 @@ class FanController:
         # Boot at full speed as sanity check (immediate, no ramp)
         self._set_all_duty_immediate(config.BOOT_DUTY)
 
-        # Initialise tach reader if enabled
-        self._tach = TachReader(self._num_channels) if config.TACH_ENABLED else None
+        # Initialise tach reader if enabled (independent of PWM channel count)
+        self._tach = TachReader() if config.TACH_ENABLED else None
 
     def _apply_phase_offsets(self):
         """
@@ -328,6 +335,7 @@ class FanController:
             status["rpm"] = self._tach.rpms
             status["stall"] = self._tach.stalled
             status["any_stalled"] = self._tach.any_stalled
+            status["tach_channels"] = self._tach.num_tach
         return status
 
     def deinit(self):

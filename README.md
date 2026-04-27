@@ -203,7 +203,7 @@ curl -H 'X-API-Key: YOUR_KEY' http://localhost:9780/api/status
 }
 ```
 
-With tach enabled, additional sensors, and per-channel override:
+With tach enabled, additional sensors, and a daisy-chained setup (2 PWM, 4 tach):
 
 ```json
 {
@@ -215,13 +215,14 @@ With tach enabled, additional sensors, and per-channel override:
     "chipset": 55.0
   },
   "controller": {
-    "fans": [50, 50, 75, 50],
-    "modes": ["auto", "auto", "override", "auto"],
+    "fans": [50, 75],
+    "modes": ["auto", "override"],
     "mode": "override",
-    "rpm": [2400, 2400, 3100, 2400],
+    "rpm": [2400, 2380, 3100, 3050],
     "stall": [false, false, false, false],
     "any_stalled": false,
-    "channels": 4,
+    "channels": 2,
+    "tach_channels": 4,
     "last_temp": 52.0,
     "watchdog": { "triggered": false, "since_feed": 2.1 }
   },
@@ -338,13 +339,28 @@ Optional fan RPM reading and stall detection via the RP2040. **Disabled by defau
 |---------|---------|-------------|
 | `TACH_ENABLED` | `False` | Enable/disable RPM reading |
 | `TACH_PINS` | `[1, 3, 5, 7]` | GPIO input pins for tach signals |
+| `TACH_TO_PWM` | `[0, 1, 2, 3]` | Maps each tach to its controlling PWM channel (for stall detection) |
 | `TACH_PULSES_PER_REV` | `2` | Pulses per revolution (2 for most fans including Noctua) |
 | `TACH_SAMPLE_MS` | `1000` | RPM measurement window in ms |
 | `TACH_STALL_THRESHOLD` | `2` | Consecutive zero-RPM samples before stall flag is set |
 
+### Daisy-Chained PWM
+
+Tach channels are **independent** of PWM channels. If you daisy-chain PWM signals (e.g. 2 PWM outputs driving 4 fans), you can still monitor all 4 RPM signals individually:
+
+```python
+# 2 PWM channels, 4 tach channels
+PWM_CHANNELS = 2
+FAN_PINS = [0, 2, 4, 6]          # Only first 2 used
+TACH_PINS = [1, 3, 5, 7]         # All 4 monitored
+TACH_TO_PWM = [0, 0, 1, 1]       # Fans 1,2 on PWM 0; Fans 3,4 on PWM 1
+```
+
+The `fans` array in the status response will have 2 entries (PWM channels), while `rpm` and `stall` will have 4 entries (tach channels).
+
 ### Stall Detection
 
-A fan is flagged as stalled when its RPM reads 0 for `TACH_STALL_THRESHOLD` consecutive samples while the duty cycle is above `MIN_DUTY`. The `any_stalled` field provides a single boolean for easy alerting.
+A fan is flagged as stalled when its RPM reads 0 for `TACH_STALL_THRESHOLD` consecutive samples while the duty cycle of its **mapped PWM channel** (via `TACH_TO_PWM`) is above `MIN_DUTY`. The `any_stalled` field provides a single boolean for easy alerting.
 
 In Homepage (customapi widget):
 ```yaml

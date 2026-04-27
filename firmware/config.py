@@ -37,8 +37,14 @@ MIN_DUTY = 20
 # Enable to read fan RPM via tach signal. Requires wiring fan tach
 # (Pin 3 on 4-pin connector) to these GPIO inputs.
 # WARNING: RP2040 GPIO is 3.3V only. Do NOT use external 5V pull-ups.
+#
+# Tach channels are INDEPENDENT of PWM channels. You can have fewer
+# PWM outputs (daisy-chained) while monitoring RPM on all fans.
+# TACH_TO_PWM maps each tach input to its controlling PWM channel index
+# for stall detection (e.g. [0, 0, 1, 1] = tach 0,1 on PWM 0; tach 2,3 on PWM 1).
 TACH_ENABLED = False              # Set True to enable RPM reading
-TACH_PINS = [1, 3, 5, 7]         # GPIO inputs, adjacent to PWM outputs
+TACH_PINS = [1, 3, 5, 7]         # GPIO inputs for tach signals
+TACH_TO_PWM = [0, 1, 2, 3]       # Which PWM channel drives each tach's fan
 TACH_PULSES_PER_REV = 2           # Standard: 2 pulses/rev (Noctua, most 4-pin fans)
 TACH_SAMPLE_MS = 1000             # RPM measurement window (ms)
 TACH_STALL_THRESHOLD = 2          # Consecutive zero-RPM samples before stall flag
