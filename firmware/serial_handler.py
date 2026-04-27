@@ -71,11 +71,32 @@ class SerialHandler:
             percent = payload.get("percent")
             if percent is None:
                 return "error", {"error": "missing percent"}
-            self._fan_controller.set_override(float(percent))
+            percent = float(percent)
+            channel = payload.get("channel")
+            if channel is not None and channel != "all":
+                ch = int(channel)
+                if ch < 0 or ch >= self._fan_controller.num_channels:
+                    return "error", {
+                        "error": "channel " + str(ch) + " out of range (0-"
+                        + str(self._fan_controller.num_channels - 1) + ")"
+                    }
+                self._fan_controller.set_override_channel(ch, percent)
+            else:
+                self._fan_controller.set_override(percent)
             return "ok", self._fan_controller.get_status()
 
         elif cmd == "SET_AUTO":
-            self._fan_controller.set_auto()
+            channel = payload.get("channel")
+            if channel is not None and channel != "all":
+                ch = int(channel)
+                if ch < 0 or ch >= self._fan_controller.num_channels:
+                    return "error", {
+                        "error": "channel " + str(ch) + " out of range (0-"
+                        + str(self._fan_controller.num_channels - 1) + ")"
+                    }
+                self._fan_controller.set_auto_channel(ch)
+            else:
+                self._fan_controller.set_auto()
             return "ok", self._fan_controller.get_status()
 
         elif cmd == "PING":

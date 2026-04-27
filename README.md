@@ -20,10 +20,13 @@ Custom fan control for the Lenovo P330 Tiny using an RP2040 Zero microcontroller
 │  serial_handler ──► fan_controller          │
 │                      │  │  │  │             │
 │              GPIO 0  2  4  6 (PWM 25kHz)    │
+│                 φ=0° 90° 180° 270° (phase)   │
 │                   │  │  │  │                │
 │              Fan1 Fan2 Fan3 Fan4            │
 └─────────────────────────────────────────────┘
 ```
+
+Channels are configurable (1–4 active). PWM phases are evenly distributed to minimise USB rail current ripple.
 
 ## Hardware
 
@@ -142,6 +145,26 @@ Default piecewise-linear curve (configured in `firmware/config.py`):
 
 Temperatures between points are linearly interpolated. Minimum duty is 20% (to prevent fan stall).
 
+## PWM Noise Mitigation
+
+The firmware includes two mechanisms to reduce inductor whine from the host USB 5V regulator:
+
+### Phase Offset
+
+PWM channels are staggered evenly across the switching period using RP2040 hardware slice counter registers. With 4 channels, each is offset by 90° — so current draw is spread across the period rather than all channels switching simultaneously. This halves (or better) the peak transient on the USB VBUS rail.
+
+### Duty Ramping
+
+Duty cycle changes are applied gradually (`DUTY_RAMP_STEP` percent per main loop tick) rather than instantaneously. At default settings (`DUTY_RAMP_STEP=2`, `LOOP_SLEEP_MS=50`), a full 0→100% ramp takes ~2.5 seconds. This eliminates the large transient step that occurs when the fan curve jumps between points.
+
+> **Note**: Failsafe (watchdog timeout) bypasses ramping — fans go to 100% immediately.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `PWM_CHANNELS` | `4` | Number of active PWM outputs (1-4) |
+| `DUTY_RAMP_ENABLED` | `True` | Enable/disable smooth duty transitions |
+| `DUTY_RAMP_STEP` | `2` | Max duty % change per main loop tick |
+
 ## Safety
 
 - **Boot**: Fans start at **100%** until first valid temperature is received
@@ -163,12 +186,15 @@ curl -H 'X-API-Key: YOUR_KEY' http://localhost:9780/api/status
 ```json
 {
   "cpu_temp": 52.0,
+  "mode": "auto",
   "temps": {
     "cpu": 52.0
   },
   "controller": {
     "fans": [50, 50, 50, 50],
+    "modes": ["auto", "auto", "auto", "auto"],
     "mode": "auto",
+    "channels": 4,
     "last_temp": 52.0,
     "watchdog": { "triggered": false, "since_feed": 2.1 }
   },
@@ -177,22 +203,25 @@ curl -H 'X-API-Key: YOUR_KEY' http://localhost:9780/api/status
 }
 ```
 
-With tach enabled and additional sensors configured, the response includes more data:
+With tach enabled, additional sensors, and per-channel override:
 
 ```json
 {
   "cpu_temp": 52.0,
+  "mode": "override",
   "temps": {
     "cpu": 52.0,
     "nvme": 40.8,
     "chipset": 55.0
   },
   "controller": {
-    "fans": [50, 50, 50, 50],
-    "rpm": [2400, 2400, 2400, 2400],
+    "fans": [50, 50, 75, 50],
+    "modes": ["auto", "auto", "override", "auto"],
+    "mode": "override",
+    "rpm": [2400, 2400, 3100, 2400],
     "stall": [false, false, false, false],
     "any_stalled": false,
-    "mode": "auto",
+    "channels": 4,
     "last_temp": 52.0,
     "watchdog": { "triggered": false, "since_feed": 2.1 }
   },
@@ -207,21 +236,35 @@ Simple health check (returns 200 if healthy, 503 if degraded).
 
 ### `POST /api/override`
 
-Set manual fan speed (overrides auto curve).
+Set manual fan speed (overrides auto curve). Optionally target a single channel.
 
 ```bash
+# All channels
 curl -X POST -H 'X-API-Key: YOUR_KEY' \
      -H 'Content-Type: application/json' \
      -d '{"percent": 75}' \
+     http://localhost:9780/api/override
+
+# Single channel
+curl -X POST -H 'X-API-Key: YOUR_KEY' \
+     -H 'Content-Type: application/json' \
+     -d '{"percent": 75, "channel": 2}' \
      http://localhost:9780/api/override
 ```
 
 ### `POST /api/auto`
 
-Return to automatic fan curve mode.
+Return to automatic fan curve mode. Optionally target a single channel.
 
 ```bash
+# All channels
 curl -X POST -H 'X-API-Key: YOUR_KEY' http://localhost:9780/api/auto
+
+# Single channel
+curl -X POST -H 'X-API-Key: YOUR_KEY' \
+     -H 'Content-Type: application/json' \
+     -d '{"channel": 2}' \
+     http://localhost:9780/api/auto
 ```
 
 ## Serial Protocol
@@ -235,6 +278,8 @@ Host → RP2040:  {"seq":1, "type":"SYN-ACK"}
 ```
 
 Commands: `SET_TEMP`, `GET_STATUS`, `SET_OVERRIDE`, `SET_AUTO`, `PING`
+
+`SET_OVERRIDE` and `SET_AUTO` accept an optional `"channel"` key in the payload (integer 0–N or `"all"`).
 
 ## HomeAssistant Integration
 

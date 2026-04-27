@@ -3,12 +3,22 @@ RP2040 Fan Controller Configuration
 Lenovo P330 Tiny - 4x 40mm PWM Fan Control
 """
 
-# --- PWM Pin Assignments ---
-# GPIO pins for 4 PWM fan outputs on RP2040 Zero
+# --- PWM Configuration ---
+# GPIO pins for PWM fan outputs on RP2040 Zero
 FAN_PINS = [0, 2, 4, 6]
+
+# Number of active PWM channels (1-4). Only the first N pins in FAN_PINS
+# are initialised. Channels are phase-offset to reduce USB rail current ripple.
+PWM_CHANNELS = 4
 
 # PWM frequency: 25kHz per Intel 4-wire PWM fan spec
 PWM_FREQUENCY = 25000
+
+# --- Duty Ramping (noise mitigation) ---
+# Smooth duty transitions to reduce transient current spikes.
+# At LOOP_SLEEP_MS=50 and DUTY_RAMP_STEP=2, full 0→100% takes ~2.5s.
+DUTY_RAMP_ENABLED = True
+DUTY_RAMP_STEP = 2              # Max duty % change per main loop tick
 
 # --- Fan Curve ---
 # Piecewise-linear: (temp_c, duty_percent)

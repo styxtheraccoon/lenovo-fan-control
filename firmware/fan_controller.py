@@ -1,10 +1,14 @@
 """
-Fan Controller - PWM management for 4x 40mm fans
+Fan Controller - PWM management for configurable fan channels
 Handles PWM output, fan curve interpolation, and mode management.
 Optional tachometer input for RPM reading and stall detection.
+
+Noise mitigation:
+  - Phase-offset PWM slices to spread USB current draw
+  - Duty ramping to smooth transitions and reduce transient spikes
 """
 
-from machine import Pin, PWM
+from machine import Pin, PWM, mem32
 import time
 import config
 
@@ -17,15 +21,17 @@ class TachReader:
     (Noctua) and open-drain fan tach outputs.
     """
 
-    def __init__(self):
+    def __init__(self, num_channels):
+        self._num_channels = num_channels
         self._pins = []
-        self._counts = [0] * len(config.TACH_PINS)
-        self._rpms = [0] * len(config.TACH_PINS)
-        self._stall_counters = [0] * len(config.TACH_PINS)
-        self._stalled = [False] * len(config.TACH_PINS)
+        self._counts = [0] * num_channels
+        self._rpms = [0] * num_channels
+        self._stall_counters = [0] * num_channels
+        self._stalled = [False] * num_channels
         self._last_sample_ms = time.ticks_ms()
 
-        for i, pin_num in enumerate(config.TACH_PINS):
+        for i in range(num_channels):
+            pin_num = config.TACH_PINS[i]
             pin = Pin(pin_num, Pin.IN, Pin.PULL_UP)
             # Each pin gets its own ISR that increments the right counter.
             # Use default-arg capture to bind `i` at definition time.
@@ -54,7 +60,7 @@ class TachReader:
         self._last_sample_ms = now
         window_s = elapsed / 1000.0
 
-        for i in range(len(self._counts)):
+        for i in range(self._num_channels):
             pulses = self._counts[i]
             self._counts[i] = 0
 
@@ -97,47 +103,119 @@ class TachReader:
 
 
 class FanController:
-    """Manages 4 PWM fan outputs with auto/manual/failsafe modes."""
+    """Manages configurable PWM fan outputs with per-channel mode tracking."""
 
     MODE_BOOT = "boot"
     MODE_AUTO = "auto"
     MODE_OVERRIDE = "override"
     MODE_FAILSAFE = "failsafe"
 
+    # RP2040 PWM register addresses for phase offset
+    _PWM_BASE = 0x40050000
+    _SLICE_STRIDE = 0x14
+    _CTR_OFFSET = 0x08
+    _TOP_OFFSET = 0x10
+
     def __init__(self):
+        self._num_channels = min(config.PWM_CHANNELS, len(config.FAN_PINS))
         self._fans = []
-        self._duties = [0, 0, 0, 0]
-        self._mode = self.MODE_BOOT
+        self._duties = [0] * self._num_channels
+        self._target_duties = [0] * self._num_channels
+        self._modes = [self.MODE_BOOT] * self._num_channels
         self._last_temp = None
 
-        # Initialise PWM on each fan pin
-        for pin_num in config.FAN_PINS:
-            pwm = PWM(Pin(pin_num))
+        # Initialise PWM on active channels
+        for i in range(self._num_channels):
+            pwm = PWM(Pin(config.FAN_PINS[i]))
             pwm.freq(config.PWM_FREQUENCY)
             self._fans.append(pwm)
 
-        # Boot at full speed as sanity check
-        self.set_all_duty(config.BOOT_DUTY)
-        self._mode = self.MODE_BOOT
+        # Stagger PWM phases to reduce USB rail current ripple
+        self._apply_phase_offsets()
+
+        # Boot at full speed as sanity check (immediate, no ramp)
+        self._set_all_duty_immediate(config.BOOT_DUTY)
 
         # Initialise tach reader if enabled
-        self._tach = TachReader() if config.TACH_ENABLED else None
+        self._tach = TachReader(self._num_channels) if config.TACH_ENABLED else None
+
+    def _apply_phase_offsets(self):
+        """
+        Offset PWM slice counters so channels switch at staggered intervals.
+        For N channels, channel i starts at i * (TOP+1) / N.
+        This spreads the current draw across the PWM period, halving (or
+        better) the peak transient on the USB VBUS rail.
+
+        GPIO-to-slice mapping: slice = gpio_num // 2
+          GPIO 0 → slice 0, GPIO 2 → slice 1, GPIO 4 → slice 2, GPIO 6 → slice 3
+        """
+        if self._num_channels <= 1:
+            return
+
+        for i in range(self._num_channels):
+            slice_num = config.FAN_PINS[i] // 2
+            addr_top = self._PWM_BASE + (slice_num * self._SLICE_STRIDE) + self._TOP_OFFSET
+            addr_ctr = self._PWM_BASE + (slice_num * self._SLICE_STRIDE) + self._CTR_OFFSET
+            top = mem32[addr_top]
+            offset = (i * (top + 1)) // self._num_channels
+            mem32[addr_ctr] = offset
 
     def _percent_to_u16(self, percent):
         """Convert 0-100% to 0-65535 PWM duty value."""
         clamped = max(0, min(100, percent))
         return int(clamped * 65535 / 100)
 
-    def set_duty(self, fan_index, percent):
-        """Set individual fan duty cycle (0–100%)."""
-        if 0 <= fan_index < len(self._fans):
+    # --- Immediate duty (bypasses ramping) ---
+
+    def _set_duty_immediate(self, fan_index, percent):
+        """Set PWM duty immediately. Used for failsafe and boot."""
+        if 0 <= fan_index < self._num_channels:
             self._duties[fan_index] = percent
+            self._target_duties[fan_index] = percent
             self._fans[fan_index].duty_u16(self._percent_to_u16(percent))
 
+    def _set_all_duty_immediate(self, percent):
+        """Set all channels immediately."""
+        for i in range(self._num_channels):
+            self._set_duty_immediate(i, percent)
+
+    # --- Target duty (respects ramping) ---
+
+    def set_duty(self, fan_index, percent):
+        """Set target duty for a channel (ramps if enabled)."""
+        if 0 <= fan_index < self._num_channels:
+            self._target_duties[fan_index] = percent
+            if not config.DUTY_RAMP_ENABLED:
+                self._duties[fan_index] = percent
+                self._fans[fan_index].duty_u16(self._percent_to_u16(percent))
+
     def set_all_duty(self, percent):
-        """Set all fans to the same duty cycle."""
-        for i in range(len(self._fans)):
+        """Set all active channels to the same target duty."""
+        for i in range(self._num_channels):
             self.set_duty(i, percent)
+
+    def ramp_tick(self):
+        """
+        Move current duties toward targets by DUTY_RAMP_STEP.
+        Call from main loop. No-op if ramping is disabled.
+        """
+        if not config.DUTY_RAMP_ENABLED:
+            return
+
+        step = config.DUTY_RAMP_STEP
+        for i in range(self._num_channels):
+            current = self._duties[i]
+            target = self._target_duties[i]
+            if current == target:
+                continue
+            if current < target:
+                new = min(current + step, target)
+            else:
+                new = max(current - step, target)
+            self._duties[i] = new
+            self._fans[i].duty_u16(self._percent_to_u16(new))
+
+    # --- Fan curve ---
 
     def temp_to_duty(self, temp_c):
         """
@@ -165,29 +243,51 @@ class FanController:
 
         return config.FAILSAFE_DUTY  # Should never reach here
 
+    # --- Mode management ---
+
     def update_from_temp(self, temp_c):
-        """Update fan speeds based on temperature (auto mode)."""
+        """Update fan speeds based on temperature (auto/boot channels only)."""
         self._last_temp = temp_c
-        if self._mode in (self.MODE_AUTO, self.MODE_BOOT):
-            duty = self.temp_to_duty(temp_c)
-            self.set_all_duty(duty)
-            self._mode = self.MODE_AUTO
+        duty = self.temp_to_duty(temp_c)
+        for i in range(self._num_channels):
+            if self._modes[i] in (self.MODE_AUTO, self.MODE_BOOT):
+                self.set_duty(i, duty)
+                self._modes[i] = self.MODE_AUTO
 
     def set_override(self, percent):
-        """Manual override - set all fans to specified duty."""
-        self._mode = self.MODE_OVERRIDE
-        self.set_all_duty(percent)
+        """Manual override — all active channels."""
+        for i in range(self._num_channels):
+            self._modes[i] = self.MODE_OVERRIDE
+            self.set_duty(i, percent)
+
+    def set_override_channel(self, channel, percent):
+        """Manual override — single channel."""
+        if 0 <= channel < self._num_channels:
+            self._modes[channel] = self.MODE_OVERRIDE
+            self.set_duty(channel, percent)
 
     def set_auto(self):
-        """Return to automatic fan curve mode."""
-        self._mode = self.MODE_AUTO
+        """Return all channels to automatic fan curve mode."""
+        for i in range(self._num_channels):
+            self._modes[i] = self.MODE_AUTO
         if self._last_temp is not None:
             self.update_from_temp(self._last_temp)
 
+    def set_auto_channel(self, channel):
+        """Return a single channel to automatic fan curve mode."""
+        if 0 <= channel < self._num_channels:
+            self._modes[channel] = self.MODE_AUTO
+            if self._last_temp is not None:
+                duty = self.temp_to_duty(self._last_temp)
+                self.set_duty(channel, duty)
+
     def trigger_failsafe(self):
-        """Watchdog triggered - ramp fans to failsafe speed."""
-        self._mode = self.MODE_FAILSAFE
-        self.set_all_duty(config.FAILSAFE_DUTY)
+        """Watchdog triggered — immediate full speed, all channels."""
+        for i in range(self._num_channels):
+            self._modes[i] = self.MODE_FAILSAFE
+        self._set_all_duty_immediate(config.FAILSAFE_DUTY)
+
+    # --- Tach ---
 
     def sample_tach(self):
         """
@@ -197,11 +297,31 @@ class FanController:
         if self._tach is not None:
             self._tach.sample(self._duties)
 
+    # --- Status ---
+
+    @property
+    def overall_mode(self):
+        """Aggregate mode: failsafe > boot > override > auto."""
+        modes = set(self._modes)
+        if self.MODE_FAILSAFE in modes:
+            return self.MODE_FAILSAFE
+        if self.MODE_BOOT in modes:
+            return self.MODE_BOOT
+        if self.MODE_OVERRIDE in modes:
+            return self.MODE_OVERRIDE
+        return self.MODE_AUTO
+
+    @property
+    def num_channels(self):
+        return self._num_channels
+
     def get_status(self):
         """Return current state as a dict for serial reporting."""
         status = {
             "fans": list(self._duties),
-            "mode": self._mode,
+            "modes": list(self._modes),
+            "mode": self.overall_mode,
+            "channels": self._num_channels,
             "last_temp": self._last_temp,
         }
         if self._tach is not None:

@@ -118,8 +118,12 @@ class APIHandler(BaseHTTPRequestHandler):
         if cpu_temp is None:
             cpu_temp = "unavailable"
 
+        # Overall mode at root level (auto/override/failsafe/boot)
+        mode = rp2040_status.get("mode", "unknown")
+
         status = {
             "cpu_temp": cpu_temp,
+            "mode": mode,
             "temps": temps,
             "controller": rp2040_status,
             "serial": {
@@ -151,7 +155,12 @@ class APIHandler(BaseHTTPRequestHandler):
         )
 
     def _handle_override(self):
-        """POST /api/override - Set manual fan speed."""
+        """POST /api/override - Set manual fan speed.
+
+        Body: {"percent": 75}
+              {"percent": 75, "channel": 0}    — single channel
+              {"percent": 75, "channel": "all"} — explicit all
+        """
         try:
             body = self._read_body()
         except Exception:
@@ -164,25 +173,58 @@ class APIHandler(BaseHTTPRequestHandler):
             return
 
         percent = max(0, min(100, float(percent)))
-        ok, resp = self.service.serial.send_command(
-            "SET_OVERRIDE", {"percent": percent}
-        )
+        payload = {"percent": percent}
+
+        channel = body.get("channel")
+        if channel is not None:
+            if channel != "all" and not isinstance(channel, int):
+                self._send_json(400, {
+                    "error": "invalid 'channel' — must be int (0-3) or 'all'"
+                })
+                return
+            payload["channel"] = channel
+
+        ok, resp = self.service.serial.send_command("SET_OVERRIDE", payload)
 
         if ok:
             self._send_json(200, {
                 "status": "ok",
                 "override_percent": percent,
+                "channel": channel if channel is not None else "all",
                 "controller": resp.get("payload", {}),
             })
         else:
             self._send_json(502, {"error": "controller offline", "detail": resp})
 
     def _handle_auto(self):
-        """POST /api/auto - Return to automatic fan curve."""
-        ok, resp = self.service.serial.send_command("SET_AUTO")
+        """POST /api/auto - Return to automatic fan curve.
+
+        Body (optional): {"channel": 0}    — single channel
+                         {"channel": "all"} — explicit all
+                         {}                 — all (default)
+        """
+        try:
+            body = self._read_body()
+        except Exception:
+            body = {}
+
+        payload = {}
+        channel = body.get("channel")
+        if channel is not None:
+            if channel != "all" and not isinstance(channel, int):
+                self._send_json(400, {
+                    "error": "invalid 'channel' — must be int (0-3) or 'all'"
+                })
+                return
+            payload["channel"] = channel
+
+        ok, resp = self.service.serial.send_command(
+            "SET_AUTO", payload if payload else None
+        )
         if ok:
             self._send_json(200, {
                 "status": "ok",
+                "channel": channel if channel is not None else "all",
                 "controller": resp.get("payload", {}),
             })
         else:

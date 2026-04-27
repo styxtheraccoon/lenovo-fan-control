@@ -41,6 +41,9 @@ def main():
         # Sample tachometer (no-op if tach disabled)
         fans.sample_tach()
 
+        # Ramp duty cycles toward targets (no-op if ramping disabled)
+        fans.ramp_tick()
+
         # Brief sleep to avoid busy-wait
         time.sleep_ms(config.LOOP_SLEEP_MS)
 
