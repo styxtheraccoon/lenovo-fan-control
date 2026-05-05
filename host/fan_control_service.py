@@ -415,9 +415,13 @@ class SerialProtocol:
             self._connected = True
             self._active_port_path = port_path
             self._last_error = None
-            # Flush any boot messages / stale data from the RP2040
-            time.sleep(0.5)
+            # Flush any boot messages / stale data from the RP2040.
+            # The RP2040 may still be in _wait_for_synack (up to 2s) for a
+            # previous seq, so we wait long enough for that to expire, then
+            # drain everything.
+            time.sleep(1.0)
             self._port.reset_input_buffer()
+            self._port.reset_output_buffer()
             log.info("Serial connected: %s @ %d baud",
                      port_path, self._config.serial_baud)
             return True
@@ -428,7 +432,7 @@ class SerialProtocol:
             return False
 
     def close_port(self):
-        """Close the serial port for reconnection (does not acquire lock)."""
+        """Close the serial port (caller MUST hold self._lock or be single-threaded)."""
         if self._port and self._port.is_open:
             try:
                 self._port.close()
@@ -436,6 +440,11 @@ class SerialProtocol:
                 log.warning("Error closing serial port: %s", e)
         self._connected = False
         self._active_port_path = None
+
+    def request_reconnect(self):
+        """Thread-safe: close port so the main loop reconnects on next iteration."""
+        with self._lock:
+            self.close_port()
 
     def disconnect(self):
         """Close the serial port for shutdown. Waits for any in-flight command to finish."""
@@ -512,7 +521,7 @@ class SerialProtocol:
                 self._last_error = None
                 return True, ack
 
-            except serial.SerialException as e:
+            except (serial.SerialException, TypeError, OSError) as e:
                 log.error("Serial error [%d]: %s", seq, e)
                 self._last_error = str(e)
                 # close_port, not disconnect — we already hold the lock
@@ -520,6 +529,9 @@ class SerialProtocol:
                 return False, {"error": str(e)}
 
         self._last_error = f"Failed after {self._config.serial_retries} retries"
+        # All retries exhausted — close port under lock so reconnect
+        # happens cleanly on the next loop iteration.
+        self.close_port()
         return False, {"error": self._last_error}
 
     @property
@@ -627,8 +639,8 @@ class FanControlService:
                     log.info("Fans: %s  Mode: %s", fans, mode)
                 else:
                     log.warning("Serial send failed: %s", resp)
-                    # close_port will trigger reconnect on next loop iteration
-                    self._serial.close_port()
+                    # send_command already closed the port under lock —
+                    # next loop iteration will reconnect.
             else:
                 log.warning("CPU temperature read failed (loop %d)", self._loop_count)
 

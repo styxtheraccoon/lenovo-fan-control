@@ -251,7 +251,7 @@ class APIHandler(BaseHTTPRequestHandler):
             # RP2040 is about to reboot — close our end of the serial port
             # so the main loop can cleanly reconnect after the device
             # re-enumerates on USB (~2-3s).
-            svc.serial.close_port()
+            svc.serial.request_reconnect()
             self._send_json(200, {
                 "status": "ok",
                 "message": "RP2040 resetting, will reconnect automatically",
