@@ -23,7 +23,8 @@ KillMode=mixed
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/dev
+ReadWritePaths=/dev /var/lib/fan-control
+StateDirectory=fan-control
 PrivateTmp=true
 
 # Logging

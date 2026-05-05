@@ -131,6 +131,10 @@ class FanController:
         self._modes = [self.MODE_BOOT] * self._num_channels
         self._last_temp = None
 
+        # Pre-failsafe snapshot for recovery
+        self._pre_failsafe_modes = None
+        self._pre_failsafe_duties = None
+
         # Initialise PWM on active channels
         for i in range(self._num_channels):
             pwm = PWM(Pin(config.FAN_PINS[i]))
@@ -290,9 +294,34 @@ class FanController:
 
     def trigger_failsafe(self):
         """Watchdog triggered — immediate full speed, all channels."""
+        # Snapshot current state so we can restore on recovery
+        self._pre_failsafe_modes = list(self._modes)
+        self._pre_failsafe_duties = list(self._target_duties)
         for i in range(self._num_channels):
             self._modes[i] = self.MODE_FAILSAFE
         self._set_all_duty_immediate(config.FAILSAFE_DUTY)
+
+    def recover_from_failsafe(self):
+        """Restore pre-failsafe state. Override channels return to their
+        override duty; auto/boot channels resume the fan curve."""
+        if self._pre_failsafe_modes is None:
+            # No snapshot (shouldn't happen) — fall back to auto
+            self.set_auto()
+            return
+
+        for i in range(self._num_channels):
+            self._modes[i] = self._pre_failsafe_modes[i]
+            if self._modes[i] == self.MODE_OVERRIDE:
+                self.set_duty(i, self._pre_failsafe_duties[i])
+            elif self._modes[i] in (self.MODE_AUTO, self.MODE_BOOT):
+                self._modes[i] = self.MODE_AUTO
+
+        # Re-apply fan curve to auto channels with last known temp
+        if self._last_temp is not None:
+            self.update_from_temp(self._last_temp)
+
+        self._pre_failsafe_modes = None
+        self._pre_failsafe_duties = None
 
     # --- Tach ---
 

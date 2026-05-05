@@ -52,6 +52,7 @@ class Config:
             "cpu": "auto",          # auto-detect CPU package temp (default)
         },
         "config_file": "/etc/fan-control/config.json",
+        "state_file": "/var/lib/fan-control/state.json",
     }
 
     def __init__(self):
@@ -97,6 +98,107 @@ class Config:
         if d.get("api_key"):
             d["api_key"] = "***"
         return d
+
+
+# ============================================================================
+# Override State Persistence
+# ============================================================================
+
+class OverrideTracker:
+    """
+    Tracks fan override state and persists to disk.
+    Survives service and system restarts so manual fan speeds are
+    re-applied after the RP2040 reconnects.
+
+    State format (JSON):
+        {"all": 75.0}                       — all channels at 75%
+        {"0": 50.0, "2": 80.0}              — per-channel overrides
+        {"all": 75.0, "0": 50.0}            — all at 75%, channel 0 at 50%
+        {}                                  — all channels in auto mode
+    """
+
+    def __init__(self, state_file):
+        self._state_file = state_file
+        self._overrides = {}  # {"all": percent} or {channel_int: percent}
+        self._load()
+
+    def set_override(self, channel, percent):
+        """Record an override. channel=None or "all" means all channels."""
+        percent = float(percent)
+        if channel is None or channel == "all":
+            # All-channel override replaces any per-channel entries
+            self._overrides = {"all": percent}
+        else:
+            self._overrides[int(channel)] = percent
+        self._save()
+
+    def set_auto(self, channel=None):
+        """Record return to auto. channel=None or "all" means all channels."""
+        if channel is None or channel == "all":
+            self._overrides = {}
+        else:
+            self._overrides.pop(int(channel), None)
+            # If the only remaining key is "all" but this channel was
+            # explicitly set back to auto, leave "all" — the firmware
+            # will apply auto to just this channel via SET_AUTO.
+        self._save()
+
+    def get_restore_commands(self):
+        """
+        Return list of SET_OVERRIDE payloads to replay on reconnect.
+        "all" entries come first, then per-channel overrides on top.
+        """
+        commands = []
+        all_pct = self._overrides.get("all")
+        if all_pct is not None:
+            commands.append({"percent": all_pct})
+        for key, pct in self._overrides.items():
+            if key != "all":
+                commands.append({"percent": pct, "channel": int(key)})
+        return commands
+
+    @property
+    def has_overrides(self):
+        return bool(self._overrides)
+
+    @property
+    def state_summary(self):
+        """Human-readable summary for logging."""
+        if not self._overrides:
+            return "auto"
+        parts = []
+        for k, v in self._overrides.items():
+            label = "all" if k == "all" else f"ch{k}"
+            parts.append(f"{label}={v:.0f}%")
+        return ", ".join(parts)
+
+    def _save(self):
+        try:
+            state_dir = os.path.dirname(self._state_file)
+            if state_dir:
+                os.makedirs(state_dir, exist_ok=True)
+            # Convert keys to strings for JSON
+            data = {str(k): v for k, v in self._overrides.items()}
+            with open(self._state_file, "w") as f:
+                json.dump(data, f)
+        except Exception as e:
+            log.warning("Failed to save override state: %s", e)
+
+    def _load(self):
+        try:
+            if os.path.isfile(self._state_file):
+                with open(self._state_file, "r") as f:
+                    data = json.load(f)
+                self._overrides = {}
+                for k, v in data.items():
+                    if k == "all":
+                        self._overrides["all"] = float(v)
+                    else:
+                        self._overrides[int(k)] = float(v)
+                log.info("Loaded saved override state: %s", self.state_summary)
+        except Exception as e:
+            log.warning("Failed to load override state: %s", e)
+            self._overrides = {}
 
 
 # ============================================================================
@@ -448,6 +550,7 @@ class FanControlService:
         self._config = Config()
         self._temp_reader = TempReader(self._config.temp_sensors)
         self._serial = SerialProtocol(self._config)
+        self._override_tracker = OverrideTracker(self._config.state_file)
         self._running = False
         self._shutdown_event = threading.Event()
         self._start_time = time.time()
@@ -479,6 +582,8 @@ class FanControlService:
 
         if not self._serial.connect():
             log.warning("Initial serial connection failed - will retry in main loop")
+        else:
+            self._apply_saved_overrides()
 
         # Start API server in background thread
         from api_server import APIServer
@@ -499,6 +604,7 @@ class FanControlService:
                 log.info("Serial disconnected, attempting reconnection...")
                 if self._serial.connect():
                     log.info("Reconnected successfully")
+                    self._apply_saved_overrides()
                 else:
                     log.warning("Reconnection failed, retrying in %ds",
                                 self._config.reconnect_interval)
@@ -554,6 +660,23 @@ class FanControlService:
         log.info("Shutdown complete")
         sys.exit(0)
 
+    def _apply_saved_overrides(self):
+        """Replay any saved override state to the RP2040 after reconnection."""
+        if not self._override_tracker.has_overrides:
+            return
+
+        log.info("Re-applying saved overrides: %s",
+                 self._override_tracker.state_summary)
+        for payload in self._override_tracker.get_restore_commands():
+            ok, resp = self._serial.send_command("SET_OVERRIDE", payload)
+            if ok:
+                ch = payload.get("channel", "all")
+                log.info("Restored override: ch=%s duty=%.0f%%",
+                         ch, payload["percent"])
+            else:
+                log.warning("Failed to restore override %s: %s", payload, resp)
+                break  # Don't keep trying if serial is broken
+
     # --- Properties for API access ---
 
     @property
@@ -579,6 +702,10 @@ class FanControlService:
     @property
     def is_running(self):
         return self._running
+
+    @property
+    def override_tracker(self):
+        return self._override_tracker
 
 
 # ============================================================================

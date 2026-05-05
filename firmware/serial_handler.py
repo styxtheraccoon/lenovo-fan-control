@@ -7,6 +7,7 @@ import sys
 import json
 import time
 import select
+import machine
 
 
 class SerialHandler:
@@ -18,7 +19,7 @@ class SerialHandler:
         RP2040 → Host:  {"seq":N, "type":"ACK", "status":"ok"|"error", "payload":{...}}
         Host → RP2040:  {"seq":N, "type":"SYN-ACK"}
 
-    Commands: SET_TEMP, GET_STATUS, SET_OVERRIDE, SET_AUTO, PING
+    Commands: SET_TEMP, GET_STATUS, SET_OVERRIDE, SET_AUTO, PING, RESET
     """
 
     def __init__(self, fan_controller, watchdog):
@@ -102,6 +103,11 @@ class SerialHandler:
         elif cmd == "PING":
             return "ok", {"pong": True, "uptime_ms": time.ticks_ms()}
 
+        elif cmd == "RESET":
+            # RESET is special — we need to ACK *before* resetting.
+            # Return a sentinel that poll() handles specially.
+            return "ok_reset", {"resetting": True}
+
         else:
             return "error", {"error": "unknown command: " + cmd}
 
@@ -168,6 +174,15 @@ class SerialHandler:
 
         # Process the command
         status, payload = self._handle_command(msg)
+
+        # RESET is special: ACK first, then reboot
+        if status == "ok_reset":
+            self._send_ack(seq, "ok", payload)
+            # Flush to ensure ACK reaches host before we vanish
+            sys.stdout.write("")  # force flush
+            time.sleep_ms(100)
+            machine.soft_reset()
+            # Never reaches here
 
         # Send ACK
         self._send_ack(seq, status, payload)

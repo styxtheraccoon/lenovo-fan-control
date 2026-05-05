@@ -21,6 +21,9 @@ class Watchdog:
         self._last_feed_time = time.ticks_ms()
         if self._triggered:
             self._triggered = False
+            # Recover from failsafe — restore pre-failsafe channel modes
+            # so override channels keep their duty, auto channels resume curve
+            self._fan_controller.recover_from_failsafe()
 
     def check(self):
         """

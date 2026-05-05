@@ -83,6 +83,8 @@ class APIHandler(BaseHTTPRequestHandler):
             self._handle_override()
         elif path == "/api/auto":
             self._handle_auto()
+        elif path == "/api/reset":
+            self._handle_reset()
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -187,6 +189,8 @@ class APIHandler(BaseHTTPRequestHandler):
         ok, resp = self.service.serial.send_command("SET_OVERRIDE", payload)
 
         if ok:
+            # Persist override state for recovery after restarts
+            self.service.override_tracker.set_override(channel, percent)
             self._send_json(200, {
                 "status": "ok",
                 "override_percent": percent,
@@ -222,6 +226,8 @@ class APIHandler(BaseHTTPRequestHandler):
             "SET_AUTO", payload if payload else None
         )
         if ok:
+            # Clear override state (or just this channel)
+            self.service.override_tracker.set_auto(channel)
             self._send_json(200, {
                 "status": "ok",
                 "channel": channel if channel is not None else "all",
@@ -230,6 +236,29 @@ class APIHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(502, {"error": "controller offline", "detail": resp})
 
+    def _handle_reset(self):
+        """POST /api/reset - Soft-reset the RP2040 microcontroller.
+
+        Sends a RESET command over serial. The RP2040 ACKs then reboots,
+        dropping the USB serial connection. The host service will auto-
+        reconnect on the next poll loop iteration.
+        """
+        svc = self.service
+
+        ok, resp = svc.serial.send_command("RESET")
+
+        if ok:
+            # RP2040 is about to reboot — close our end of the serial port
+            # so the main loop can cleanly reconnect after the device
+            # re-enumerates on USB (~2-3s).
+            svc.serial.close_port()
+            self._send_json(200, {
+                "status": "ok",
+                "message": "RP2040 resetting, will reconnect automatically",
+                "controller": resp.get("payload", {}),
+            })
+        else:
+            self._send_json(502, {"error": "controller offline", "detail": resp})
 
 class APIServer:
     """Threaded HTTP API server."""
