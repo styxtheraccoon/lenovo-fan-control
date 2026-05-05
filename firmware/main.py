@@ -4,7 +4,9 @@ Main entry point for MicroPython firmware.
 
 Boots fans at 100%, listens for temperature data over USB serial,
 and adjusts fan speeds via configurable fan curve.
-Falls back to 100% if communication is lost for >5 seconds.
+Falls back to 100% if communication is lost for >15 seconds.
+Hard-resets (USB re-enumeration) if comms aren't restored within
+60s (failsafe) or 180s (boot) to clear stale serial state.
 """
 
 import time

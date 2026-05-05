@@ -65,6 +65,7 @@ class SerialHandler:
             status_data["watchdog"] = {
                 "triggered": self._watchdog.is_triggered,
                 "since_feed": round(self._watchdog.seconds_since_feed, 1),
+                "reboot_in": round(self._watchdog.reboot_countdown, 1),
             }
             return "ok", status_data
 

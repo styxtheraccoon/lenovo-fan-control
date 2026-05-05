@@ -59,6 +59,19 @@ FAILSAFE_DUTY = 100
 # Duty cycle on boot before first temperature received
 BOOT_DUTY = 100
 
+# --- Reboot Timeouts ---
+# Hard-reset the RP2040 if communication isn't (re-)established within
+# these windows.  A hard reset tears down the USB CDC endpoint, forcing
+# the host kernel to re-enumerate the device and clearing any stale
+# serial state on both sides.
+
+# Seconds in FAILSAFE mode before hard reset (host reboot recovery)
+FAILSAFE_REBOOT_TIMEOUT_S = 60
+
+# Seconds in BOOT mode (initial power-on) before hard reset
+# Longer than failsafe — the host service may not be started yet.
+BOOT_REBOOT_TIMEOUT_S = 180
+
 # --- Serial ---
 SERIAL_BAUD = 115200
 
