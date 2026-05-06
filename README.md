@@ -1,3 +1,5 @@
+*Built with the assistance of Claude Opus 4.6 in [Antigravity](https://blog.google/technology/google-deepmind/antigravity/).*
+
 # Lenovo P330 Tiny — Fan Control System
 
 Custom fan control for the Lenovo P330 Tiny using an RP2040 Zero microcontroller and 4× 40mm PWM fans. The host Proxmox service reads CPU temperatures, sends them to the RP2040 over USB serial, and exposes an HTTP API for HomeAssistant / Homepage integration.
@@ -414,5 +416,10 @@ lenovo-fan-control/
 │   ├── fan-control.service      # systemd unit file
 │   └── fan-control.env          # Environment variable defaults
 ├── install.sh                   # Host installation script
+├── LICENSE                      # PolyForm Noncommercial 1.0.0
 └── README.md                    # This file
 ```
+
+## License
+
+This project is licensed under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/). You are free to use, modify, and redistribute this software for **noncommercial purposes**. Commercial use requires explicit permission from the author — see the [LICENSE](LICENSE) file for full terms.
